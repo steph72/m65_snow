@@ -13,17 +13,19 @@ all: hello generate
 hello:
 	@echo "m65snow makefile"
 
-generate: snow
+generate: snow_65
 
 clean:
 	rm -rf ${BINDIR}/*
 
 test:
-	m65 ${BINDIR}/${PRGNAME} -r -F -l /dev/ttyUSB1
+	m65 ${BINDIR}/${PRGNAME}_wrapped -r -F -l /dev/ttyUSB1
 
 emu:
-	xemu-xmega65 -prg ${BINDIR}/${PRGNAME} -besure
+	xemu-xmega65 -prg ${BINDIR}/${PRGNAME}_wrapped -besure
 
 snow: src/m65snow.c
-	${CC} src/m65snow.c -p mega65 -a -o ../${BINDIR}/${PRGNAME}
+	${CC} src/m65snow.c -p mega65_c64 -a -o ../${BINDIR}/${PRGNAME}
 
+snow_65: snow
+	cat ./cbm/wrapper.prg ${BINDIR}/${PRGNAME} > ${BINDIR}/${PRGNAME}_wrapped

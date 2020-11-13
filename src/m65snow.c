@@ -5,36 +5,118 @@
 #include <mega65-dma.h>
 #include <conio.h>
 
-#define MAX_FLAKES 50
+const unsigned int maxFlakes = 100;
 
 byte *kbscan = 0xd610; // keyboard scanner
 
-const byte width = 80;
-const byte height = 25;
+const byte width = 89;
+const byte height = 71;
 const unsigned int size = width * height;
 
-const char *flakeSymbols = "*,.+";
+const char *flakeSymbols = "*+,.";
+
+long textScreen = 0x40000;
 
 typedef struct
 {
 	byte x;
 	byte y;
+	byte delay;
+	byte currentCount;
 	signed byte dir;
-	bool isFree;
+	byte isFree;
 	char sign;
 } snowflake;
 
-byte delay[MAX_FLAKES];
-byte currentCount[MAX_FLAKES];
-
 snowflake *flakes;
 byte canvas[size];
+
+signed byte windDir;
+unsigned int windCooldown;
+unsigned int windDuration;
+
+// DMA list entry for filling data in the 1MB memory space
+struct DMA_LIST_F018B memfill_dma_command4 = {
+	DMA_COMMAND_FILL, // command
+	0,				  // count
+	0,				  // source
+	0,				  // source bank
+	0,				  // destination
+	0,				  // destination bank
+	0,				  // sub-command
+	0				  // modulo-value
+};
+
+// DMA list entry with options for copying data in the 256MB memory space
+// Contains DMA options options for setting MB followed by DMA_LIST_F018B struct.
+char memfill_dma_command256[] = {
+	DMA_OPTION_SRC_MB, 0x00,  // Set MB of source address
+	DMA_OPTION_DEST_MB, 0x00, // Set MB of destination address
+	DMA_OPTION_FORMAT_F018B,  // Use F018B list format
+	DMA_OPTION_END,			  // End of options
+							  // struct DMA_LIST_F018B
+	DMA_COMMAND_FILL,		  // command
+	0, 0,					  // count
+	0, 0,					  // source
+	0,						  // source bank
+	0, 0,					  // destination
+	0,						  // destination bank
+	0,						  // sub-command
+	0, 0					  // modulo-value
+};
+
+void memfill_dma256(char dest_mb, char dest_bank, void *dest, char src_mb, char src_bank, void *src, unsigned int num)
+{
+	// Remember current F018 A/B mode
+	char dmaMode = DMA->EN018B;
+	// Set up command
+	memfill_dma_command256[1] = src_mb;
+	memfill_dma_command256[3] = dest_mb;
+	struct DMA_LIST_F018B *f018b = (struct DMA_LIST_F018B *)(&memfill_dma_command256[6]);
+	f018b->count = num;
+	f018b->src_bank = src_bank;
+	f018b->src = src;
+	f018b->dest_bank = dest_bank;
+	f018b->dest = dest;
+	// Set F018B mode
+	DMA->EN018B = 1;
+	// Set address of DMA list
+	DMA->ADDRMB = 0;
+	DMA->ADDRBANK = 0;
+	DMA->ADDRMSB = > memfill_dma_command256;
+	// Trigger the DMA (with option lists)
+	DMA->ETRIG = < memfill_dma_command256;
+	// Re-enable F018A mode
+	DMA->EN018B = dmaMode;
+}
+
+void memfill_dma4(char dest_bank, void *dest, char src_bank, void *src, unsigned int num)
+{
+	// Remember current F018 A/B mode
+	char dmaMode = DMA->EN018B;
+	// Set up command
+	memfill_dma_command4.count = num;
+	memfill_dma_command4.src_bank = src_bank;
+	memfill_dma_command4.src = src;
+	memfill_dma_command4.dest_bank = dest_bank;
+	memfill_dma_command4.dest = dest;
+	// Set F018B mode
+	DMA->EN018B = 1;
+	// Set address of DMA list
+	DMA->ADDRMB = 0;
+	DMA->ADDRBANK = 0;
+	DMA->ADDRMSB = > &memfill_dma_command4;
+	// Trigger the DMA (without option lists)
+	DMA->ADDRLSBTRIG = < &memfill_dma_command4;
+	// Re-enable F018A mode
+	DMA->EN018B = dmaMode;
+}
 
 void mega65_io_enable()
 {
 	VICIV->KEY = 0x47;
 	VICIV->KEY = 0x53;
-	*PROCPORT_DDR = 64;
+	*PROCPORT_DDR = 65;
 }
 
 char cgetc()
@@ -47,16 +129,52 @@ char cgetc()
 	return res;
 }
 
+void initScreen()
+{
+
+	mega65_io_enable();
+
+	VICIV->RASLINE0 &= 127; // force pal mode
+
+	VICIV->CONTROLB |= 128; // enable 80chars
+	VICIV->CONTROLB |= 8;	// enable interlace
+
+	VICIV->TBDRPOS_LO = 18; // disable top border
+	VICIV->TEXTYPOS_LO = 1; // text y pos
+
+	VICIV->BBDRPOS_HI = 2;
+	VICIV->BBDRPOS_LO = 78; // disable bottom border
+
+	VICIV->ROWCOUNT = height - 1;
+
+	VICIV->SIDBDRWD_LO = 44; // reduce side border
+	VICIV->TEXTXPOS_LO = 44; // text x pos
+
+	VICIV->CHRCOUNT = width; // characters per row
+	VICIV->CHARSTEP_LO = width;
+
+	// set screen pointer
+	VICIV->SCRNPTR_HIHI = 0x00;
+	VICIV->SCRNPTR_HILO = 0x04;
+	VICIV->SCRNPTR_LOHI = 0x00;
+	VICIV->SCRNPTR_LOLO = 0x00;
+
+	// clear char & text ram
+
+	memfill_dma4(0, canvas, 0, 32, size);
+	memfill_dma256(0xff, 0x08, 0x0000, 0x00, 0x00, 01, size);
+}
+
 void initFlakes()
 {
-	byte i;
+	unsigned int i;
 	byte r;
-	flakes = malloc(MAX_FLAKES * sizeof(snowflake));
-	for (i = 0; i < MAX_FLAKES; ++i)
+	flakes = malloc(maxFlakes * sizeof(snowflake));
+	for (i = 0; i < maxFlakes; ++i)
 	{
 		(flakes + i)->x = 255;
 		(flakes + i)->y = 255;
-		(flakes + i)->isFree = true;
+		(flakes + i)->isFree = 1;
 		r = rand() & 15;
 		if (r > 8)
 		{
@@ -67,36 +185,71 @@ void initFlakes()
 			(flakes + i)->dir = -1;
 		}
 	}
+
+	windDir = 0;
+	windCooldown = 500 + (rand()&511);
+	windDuration = 0;
 }
 
 void canvasToScreen()
 {
-	memcpy_dma(DEFAULT_SCREEN, canvas, size);
+	memcpy_dma4(4, 0, 0, canvas, size);
 }
 
-void screenToCanvas()
+void changeWindDir()
 {
-	memcpy_dma(canvas, DEFAULT_SCREEN, size);
+	byte ch;
+
+	if (windCooldown>0) {
+		windCooldown--;
+		return;
+	}
+
+	if (windDuration>0) {
+		windDuration--;
+		if (windDuration==0) {
+			windDir=0;
+			windCooldown= (unsigned int)200 + (rand()&255);
+		}
+		return;
+	} 
+
+	ch = rand() & 255;
+	
+	if (ch>200) {
+
+		ch = rand() & 1;
+
+		if (ch) {
+			windDir=-1;
+		} else {
+			windDir=1;
+		}
+
+		windDuration=100+(rand()&127);
+
+	}
+
 }
 
 void addFlake()
 {
-	byte i;
+	unsigned int i;
 	byte charIdx;
 	snowflake *current;
 
-	for (i = 0; i < MAX_FLAKES; ++i)
+	for (i = 0; i < maxFlakes; ++i)
 	{
 		current = flakes + i;
 		if (current->isFree)
 		{
 			charIdx = rand() & 3;
-			current->x = (rand() & 63) + (rand() & 15);
+			current->x = (rand() & 63) + (rand() & 15) + (rand() & 7) + (rand() & 3);
 			current->y = 0;
 			current->sign = flakeSymbols[charIdx];
-			current->isFree = false;
-			delay[i] = (byte)(rand() & 3) + 2;
-			currentCount[i] = delay[i];
+			current->isFree = 0;
+			current->delay = charIdx + 2;
+			current->currentCount = current->delay;
 
 			return;
 		}
@@ -132,29 +285,33 @@ bool doFlake(snowflake *aFlake)
 	{
 		// flake has reached bottom of screen
 		growSnowHeapAt(aFlake->x, aFlake->y);
-		aFlake->isFree = true;
+		aFlake->isFree = 1;
 		return false;
 	}
 
-	newX = aFlake->x;
+	newX = aFlake->x + windDir;
 	newY = aFlake->y + 1;
 
-	randomNumber = rand() & 15;
-	if (randomNumber >= 8)
+	if (windDir == 0)
 	{
-		randomNumber = rand() & 31;
-		if (randomNumber >= 28)
+		randomNumber = rand() & 127;
+
+		if (randomNumber >= 110)
 		{
-			changeHorizontalDirection(aFlake);
+			// also move snowflake horizontally
+			randomNumber = rand() & 255;
+			if (randomNumber >= 230)
+			{
+				changeHorizontalDirection(aFlake);
+			}
+			newX = aFlake->x + aFlake->dir;
 		}
-		// also move snowflake horizontally
-		newX = aFlake->x + aFlake->dir;
 	}
 
 	if (newX >= width)
 	{
 		// flake exited on left or right side of screen
-		aFlake->isFree = true;
+		aFlake->isFree = 1;
 		return false;
 	}
 
@@ -173,7 +330,7 @@ bool doFlake(snowflake *aFlake)
 		{
 			growSnowHeapAt(aFlake->x, aFlake->y);
 		}
-		aFlake->isFree = true;
+		aFlake->isFree = 1;
 		return false;
 	}
 
@@ -201,17 +358,17 @@ byte canvasAt(byte x, byte y)
 
 void doFlakes()
 {
-	byte i;
+	unsigned int i;
 	snowflake *current;
-	for (i = 0; i < MAX_FLAKES; ++i)
+	for (i = 0; i < maxFlakes; ++i)
 	{
 		current = flakes + i;
 		if (!current->isFree)
 		{
-			currentCount[i]--;
-			if (currentCount[i] == 0)
+			current->currentCount--;
+			if (current->currentCount == 0)
 			{
-				currentCount[i] = delay[i];
+				current->currentCount = current->delay;
 				setCanvas(current->x, current->y, 32);
 				if (doFlake(current))
 				{
@@ -225,27 +382,26 @@ void doFlakes()
 void main(void)
 {
 	byte i;
-	mega65_io_enable();
+	clrscr();
+	initScreen();
 	initFlakes();
 	bordercolor(0);
 	bgcolor(0);
 
-	clrscr();
-	screenToCanvas();
-
 	for (;;)
 	{
 		doFlakes();
-		i = rand() & 127;
-		if (i > 100)
+		i = rand() & 255;
+		if (i > 200)
 		{
 			addFlake();
 		}
-		for (i = 0; i < 20; ++i)
+		for (i = 0; i < 200; ++i)
 		{
 			while (VICIII->RASTER)
 				;
 		}
 		canvasToScreen();
+		changeWindDir();
 	}
 }
