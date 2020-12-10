@@ -5,13 +5,15 @@
 #include <mega65-dma.h>
 #include <conio.h>
 
-const unsigned int maxFlakes = 100;
+#include "greet.c"
+
+const unsigned int maxFlakes = 200;
 
 byte *kbscan = 0xd610; // keyboard scanner
 
 const byte width = 89;
 const byte height = 71;
-const unsigned int size = width * height;
+const unsigned int size = width*height;
 
 const char *flakeSymbols = "*+,.";
 
@@ -30,6 +32,8 @@ typedef struct
 
 snowflake *flakes;
 byte canvas[size];
+byte color[size];
+byte background[size];
 
 signed byte windDir;
 unsigned int windCooldown;
@@ -143,7 +147,7 @@ void initScreen()
 	VICIV->TEXTYPOS_LO = 1; // text y pos
 
 	VICIV->BBDRPOS_HI = 2;
-	VICIV->BBDRPOS_LO = 78; // disable bottom border
+	VICIV->BBDRPOS_LO = 70; // disable bottom border
 
 	VICIV->ROWCOUNT = height - 1;
 
@@ -161,8 +165,9 @@ void initScreen()
 
 	// clear char & text ram
 
-	memfill_dma4(0, canvas, 0, 32, size);
-	memfill_dma256(0xff, 0x08, 0x0000, 0x00, 0x00, 01, size);
+	memcpy_dma(background,frame0000+2,size);
+	// memfill_dma4(0, background, 0, 32, size);
+	// memfill_dma256(0xff, 0x08, 0x0000, 0x00, 0x00, 01, size);
 }
 
 void initFlakes()
@@ -187,52 +192,61 @@ void initFlakes()
 	}
 
 	windDir = 0;
-	windCooldown = 500 + (rand()&511);
+	windCooldown = 500 + (rand() & 511);
 	windDuration = 0;
 }
 
 void canvasToScreen()
 {
 	memcpy_dma4(4, 0, 0, canvas, size);
+	memcpy_dma256(0xff,0x08,0x000,0x00,0x00,color,size);
+
 }
 
 void changeWindDir()
 {
-	byte ch;
+	byte shouldChangeDir;
 
-	if (windCooldown>0) {
+	if (windCooldown > 0)
+	{
 		windCooldown--;
 		return;
 	}
 
-	if (windDuration>0) {
+	if (windDuration > 0)
+	{
 		windDuration--;
-		if (windDuration==0) {
-			windDir=0;
-			windCooldown= (unsigned int)200 + (rand()&255);
+		if (windDuration == 0)
+		{
+			windDir = 0;
+			windCooldown = (unsigned int)200 + (rand() & 255);
 		}
 		return;
-	} 
-
-	ch = rand() & 255;
-	
-	if (ch>200) {
-
-		ch = rand() & 1;
-
-		if (ch) {
-			windDir=-1;
-		} else {
-			windDir=1;
-		}
-
-		windDuration=100+(rand()&127);
-
 	}
 
+	shouldChangeDir = rand() & 255;
+
+	if (shouldChangeDir > 200)
+	{
+
+		if (rand() & 1)
+		{
+			windDir = -1;
+		}
+		else
+		{
+			windDir = 1;
+		}
+
+		windDuration = 100 + (rand() & 127);
+	}
 }
 
-void addFlake()
+#define DIR_TOP 0
+#define DIR_LEFT 1
+#define DIR_RIGHT 2
+
+void addFlake(byte dir)
 {
 	unsigned int i;
 	byte charIdx;
@@ -243,13 +257,29 @@ void addFlake()
 		current = flakes + i;
 		if (current->isFree)
 		{
+
 			charIdx = rand() & 3;
-			current->x = (rand() & 63) + (rand() & 15) + (rand() & 7) + (rand() & 3);
-			current->y = 0;
+			if (dir == DIR_TOP)
+			{
+				current->x = (rand() & 63) + (rand() & 15) + (rand() & 7) + (rand() & 3);
+				current->y = 0;
+			}
+			else if (dir == DIR_LEFT)
+			{
+				current->x = 0;
+				current->y = (rand() & 63) + (rand() & 7);
+			}
+			else if (dir == DIR_RIGHT)
+			{
+				current->x = width - 1;
+				current->y = (rand() & 63) + (rand() & 7);
+			}
+
 			current->sign = flakeSymbols[charIdx];
 			current->isFree = 0;
 			current->delay = charIdx + 2;
 			current->currentCount = current->delay;
+			current->dir = 0;
 
 			return;
 		}
@@ -346,6 +376,7 @@ void setCanvas(byte x, byte y, char s)
 	adr = (unsigned int)y * width;
 	adr += (unsigned int)x;
 	canvas[adr] = s;
+	color[adr]=1; // white
 }
 
 byte canvasAt(byte x, byte y)
@@ -360,21 +391,21 @@ void doFlakes()
 {
 	unsigned int i;
 	snowflake *current;
+
+	memcpy_dma(canvas,background,size);
+	memcpy_dma(color,frame0000+2+size,size);
+
 	for (i = 0; i < maxFlakes; ++i)
 	{
 		current = flakes + i;
 		if (!current->isFree)
 		{
-			current->currentCount--;
-			if (current->currentCount == 0)
+			if (current->currentCount-- == 0)
 			{
 				current->currentCount = current->delay;
-				setCanvas(current->x, current->y, 32);
-				if (doFlake(current))
-				{
-					setCanvas(current->x, current->y, current->sign);
-				}
+				doFlake(current);
 			}
+			setCanvas(current->x, current->y, current->sign);
 		}
 	}
 }
@@ -385,7 +416,7 @@ void main(void)
 	clrscr();
 	initScreen();
 	initFlakes();
-	bordercolor(0);
+	bordercolor(5);
 	bgcolor(0);
 
 	for (;;)
@@ -394,7 +425,15 @@ void main(void)
 		i = rand() & 255;
 		if (i > 200)
 		{
-			addFlake();
+			addFlake(DIR_TOP);
+			if (windDir == -1)
+			{
+				addFlake(DIR_RIGHT);
+			}
+			else if (windDir == 1)
+			{
+				addFlake(DIR_LEFT);
+			}
 		}
 		for (i = 0; i < 200; ++i)
 		{

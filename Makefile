@@ -8,7 +8,7 @@ BINDIR = bin
 
 CC = /home/stephan/kickc/bin/kickc.sh
 
-all: hello generate
+all: hello generate test
 
 hello:
 	@echo "m65snow makefile"
