@@ -17,7 +17,7 @@ const unsigned int size = width*height;
 
 const char *flakeSymbols = "*+,.";
 
-long textScreen = 0x40000;
+long background = 0x0000;  // for c65 mode, background is kept in bank 5 (no room in bank 0)
 
 typedef struct
 {
@@ -33,7 +33,6 @@ typedef struct
 snowflake *flakes;
 byte canvas[size];
 byte color[size];
-byte background[size];
 
 signed byte windDir;
 unsigned int windCooldown;
@@ -158,6 +157,7 @@ void initScreen()
 	VICIV->CHARSTEP_LO = width;
 
 	// set screen pointer
+	// (we keep the text screen in bank 4)
 	VICIV->SCRNPTR_HIHI = 0x00;
 	VICIV->SCRNPTR_HILO = 0x04;
 	VICIV->SCRNPTR_LOHI = 0x00;
@@ -165,7 +165,8 @@ void initScreen()
 
 	// clear char & text ram
 
-	memcpy_dma(background,frame0000+2,size);
+	memcpy_dma4(5,(void*)background,0,frame0000+2,size);
+	// memcpy_dma(background,frame0000+2,size);
 	// memfill_dma4(0, background, 0, 32, size);
 	// memfill_dma256(0xff, 0x08, 0x0000, 0x00, 0x00, 01, size);
 }
@@ -392,7 +393,7 @@ void doFlakes()
 	unsigned int i;
 	snowflake *current;
 
-	memcpy_dma(canvas,background,size);
+	memcpy_dma4(0,canvas,5,(void*)background,size);
 	memcpy_dma(color,frame0000+2+size,size);
 
 	for (i = 0; i < maxFlakes; ++i)
